@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""
+Virtual Pet Simulator
+"""
+import os
+import json
+import time
+import random
+from pathlib import Path
+
+# Configuration
+DIR = Path("pets")
+DIR.mkdir(exist_ok=True)
+HAPPY_DECAY = 0.1984   # Happiness lost per hour
+HUNGER_DECAY = 1.3889  # Hunger lost per hour
+
+# Lifespan helper
+def roll_lifespan() -> float:
+    days = random.randint(15, 30)
+    return time.time() + days * 86400
+
+# File system helpers
+def pet_files() -> list[Path]:
+    return sorted(f for f in DIR.iterdir() if f.is_file())
+
+def read_pet(f: Path) -> tuple[str, str, dict]:
+    try:
+        lines = f.read_text().splitlines()
+        if len(lines) < 3:
+            raise ValueError("Too few lines")
+        uid = lines[0].strip()
+        name = lines[1].strip()
+        stats = json.loads(lines[2])
+        required = {"Happiness", "Hunger", "ts_h", "ts_u", "death"}
+        if not all(key in stats for key in required):
+            raise ValueError("Missing required stats")
+        if not isinstance(stats["Happiness"], list) or not isinstance(stats["Hunger"], list):
+            raise ValueError("Invalid format")
+        return uid, name, stats
+    except Exception:
+        print(f"Corrupted pet file {f.name}, removing...")
+        f.unlink(missing_ok=True)
+        return "", "", {}
+
+def write_pet(f: Path, uid: str, name: str, stats: dict) -> None:
+    f.write_text(f"{uid}\n{name}\n{json.dumps(stats)}\n")
+
+# Core update logic
+def update(f: Path):
+    now = time.time()
+    uid, name, stats = read_pet(f)
+    if not uid:
+        return None
+
+    death = stats.get("death")
+    if not isinstance(death, (int, float)) or death <= 0:
+        print(f"{name} has invalid death timestamp, removing...")
+        f.unlink(missing_ok=True)
+        return None
+
+    if now >= death:
+        print(f"{name} has reached the end of its life.")
+        f.unlink(missing_ok=True)
+        return None
+
+    ts_h = stats.get("ts_h", now)
+    ts_u = stats.get("ts_u", now)
+
+    hours_h = max((now - ts_h) / 3_600, 0)
+    hours_u = max((now - ts_u) / 3_600, 0)
+
+    happy = (stats.get("Happiness") or [100])[0]
+    hunger = (stats.get("Hunger") or [100])[0]
+
+    happy -= HAPPY_DECAY * hours_h
+    hunger -= HUNGER_DECAY * hours_u
+
+    happy = max(happy, 0)
+    hunger = max(hunger, 0)
+
+    if happy <= 0 or hunger <= 0:
+        cause = "unhappiness" if happy <= 0 else "starvation"
+        input(f"\n{name} has died from {cause}.")
+        f.unlink(missing_ok=True)
+        return None
+
+    # Update Timestamps
+    stats["ts_h"] = now
+    stats["ts_u"] = now
+    stats["Happiness"] = [happy]
+    stats["Hunger"] = [hunger]
+    stats["death"] = death
+
+    write_pet(f, uid, name, stats)
+    return happy, hunger
+
+# Adopt a new pet
+def adopt() -> None:
+    name = input("Name: ").strip() or "Pet"
+    uid = os.urandom(3).hex().upper()
+    secret = os.urandom(4).hex().lower()
+    stats = {
+        "Happiness": [100],
+        "Hunger": [100],
+        "ts_h": time.time(),
+        "ts_u": time.time(),
+        "death": roll_lifespan()
+    }
+    filename = DIR / f"{uid}_{secret}_{name}"
+    write_pet(filename, uid, name, stats)
+
+# List all pets
+def list_pets() -> list[Path]:
+    files = []
+    for idx, f in enumerate(pet_files(), 1):
+        result = update(f)
+        if result:
+            happy, hunger = result
+            _, name, _ = read_pet(f)
+            print(f"{idx}) {name} Happiness:{happy:.0f} Hunger:{hunger:.0f}")
+            files.append(f)
+    return files
+
+# Interact with a pet
+def interact(idx: int) -> None:
+    files = list_pets()
+    if not (1 <= idx <= len(files)):
+        return
+    f = files[idx - 1]
+    while True:
+        result = update(f)
+        if not result:
+            return
+        happy, hunger = result
+        uid, name, stats = read_pet(f)
+        os.system("clear")
+        print(f"\n{name} Happiness:{happy:.0f} Hunger:{hunger:.0f}")
+        print("[p]lay [f]eed p[o]op [b]ack ")
+        action = input(">> ").strip().lower()
+        if action == "p":
+            stats["Happiness"][0] = min(stats["Happiness"][0] + 25, 100)
+            stats["ts_h"] = time.time()
+            stats["Hunger"][0] = max(stats["Hunger"][0] - 10, 0)
+            os.system("clear")
+            input(f"\nyou played with {name}")
+        elif action == "f":
+            stats["Hunger"][0] = min(stats["Hunger"][0] + 30, 100)
+            stats["ts_u"] = time.time()
+            stats["Happiness"][0] = min(stats["Happiness"][0] + 5, 100)
+            os.system("clear")
+            input(f"\nyou fed {name}")
+        elif action == "o":
+            stats["Happiness"][0] = max(stats["Happiness"][0] - 25, 0)
+            stats["Hunger"][0] = min(stats["Hunger"][0] + 10, 100)
+            stats["ts_u"] = time.time()
+            os.system("clear")
+            input(f"\nyou pooped on {name}")
+        elif action == "b":
+            return
+        else:
+            continue 
+        write_pet(f, uid, name, stats)
+
+# Rehome a pet
+def rehome() -> None:
+    files = pet_files()
+    if not files:
+        input("No pets to rehome.")
+        return
+    for idx, f in enumerate(files, 1):
+        _, name, _ = read_pet(f)
+        print(f"{idx}) {name}")
+    choice = input(">> ").strip()
+    if choice.isdigit() and 1 <= int(choice) <= len(files):
+        f = files[int(choice) - 1]
+        _, name, _ = read_pet(f)
+        f.unlink(missing_ok=True)
+
+# Main menu loop
+while True:
+    os.system("clear")
+    print("1) Pets\n2) Adopt\n3) Rehome\n4) Exit")
+    c = input(">> ").strip()
+    if c == "1":
+        os.system("clear")
+        files = list_pets()
+        if files:
+            choice = input(">> ").strip()
+            if choice.isdigit():
+                interact(int(choice))
+    elif c == "2":
+        os.system("clear")
+        adopt()
+    elif c == "3":
+        os.system("clear")
+        rehome()
+    elif c == "4":
+        break
+
